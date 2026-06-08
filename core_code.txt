@@ -1,0 +1,113 @@
+#include <Eigen/Dense>
+#include <vector>
+#include <cmath>
+
+using namespace std;
+using namespace Eigen;
+
+struct Result {
+    Vector2d Txy;
+    Matrix2d SigXY;
+    double cost;
+};
+
+bool triangulateLoBs(
+    const vector<double>& sensor_x,
+    const vector<double>& sensor_y,
+    const vector<double>& theta,
+    Result& out
+) {
+    const int N = sensor_x.size();
+    if (N < 2 || sensor_y.size() != N || theta.size() != N)
+        return false;
+
+    const double Rmax = 10000.0;  // fixed sensor range (meters or system units)
+
+    MatrixXd A(N, 2);
+    VectorXd b(N);
+    MatrixXd W = MatrixXd::Zero(N, N);
+
+    // ---------- Build system ----------
+    for (int i = 0; i < N; i++) {
+        double th = theta[i];
+
+        double a = sin(th);
+        double b_i = -cos(th);
+        double c = sensor_x[i] * sin(th) - sensor_y[i] * cos(th);
+
+        A(i, 0) = a;
+        A(i, 1) = b_i;
+        b(i) = c;
+
+        W(i, i) = 1.0;
+    }
+
+    // ---------- Solve ----------
+    Matrix2d H = A.transpose() * W * A;
+
+    SelfAdjointEigenSolver<Matrix2d> es(H);
+    double cond = es.eigenvalues()(1) / (es.eigenvalues()(0) + 1e-12);
+    if (cond > 1e6) return false;
+
+    Vector2d Txy = H.ldlt().solve(A.transpose() * W * b);
+
+    // ---------- residual ----------
+    VectorXd r = A * Txy - b;
+    double cost = (r.transpose() * W * r)(0);
+
+    if (cost > 1e-2) return false;
+
+    // ---------- covariance ----------
+    Matrix2d SigXY = H.inverse();
+    if (SigXY.trace() > 1e4) return false;
+
+    // ---------- forward-ray check ----------
+    for (int i = 0; i < N; i++) {
+        Vector2d dir(cos(theta[i]), sin(theta[i]));
+        Vector2d v(Txy.x() - sensor_x[i], Txy.y() - sensor_y[i]);
+
+        if (dir.dot(v) < 0)
+            return false;
+    }
+
+    // ---------- crossing angle check ----------
+    const double minAngle = 5.0 * M_PI / 180.0;
+
+    for (int i = 0; i < N; i++) {
+        for (int j = i + 1; j < N; j++) {
+            double d = fabs(theta[i] - theta[j]);
+            d = min(d, 2 * M_PI - d);
+
+            if (d < minAngle)
+                return false;
+        }
+    }
+
+    // ---------- range / scope check ----------
+    for (int i = 0; i < N; i++) {
+        double dx = Txy.x() - sensor_x[i];
+        double dy = Txy.y() - sensor_y[i];
+
+        double range = sqrt(dx * dx + dy * dy);
+
+        if (range > Rmax)
+            return false;
+    }
+
+    // ---------- output ----------
+    out.Txy = Txy;
+    out.SigXY = SigXY;
+    out.cost = cost;
+
+    return true;
+}
+
+
+
+Result res;
+
+bool ok = triangulateLoBs(sensorX, sensorY, angles, res);
+
+if (ok) {
+    std::cout << "Target: " << res.position.transpose() << std::endl;
+}
